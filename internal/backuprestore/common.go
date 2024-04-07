@@ -73,7 +73,7 @@ var (
 	hostPath = common.Host
 
 	dpaGvk     = schema.GroupVersionKind{Group: "oadp.openshift.io", Kind: "DataProtectionApplication", Version: "v1alpha1"}
-	dpaGvkList = schema.GroupVersionKind{Group: "oadp.openshift.io", Kind: "DataProtectionApplicationList", Version: "v1alpha1"}
+	DpaGvkList = schema.GroupVersionKind{Group: "oadp.openshift.io", Kind: "DataProtectionApplicationList", Version: "v1alpha1"}
 )
 
 // BackuperRestorer interface also used for mocks
@@ -318,7 +318,7 @@ func setBackupLabel(backup *velerov1.Backup, newLabels map[string]string) {
 	backup.SetLabels(labels)
 }
 
-func isDPAReconciled(dpa *unstructured.Unstructured) bool {
+func IsDPAReconciled(dpa *unstructured.Unstructured) bool {
 	if dpa.Object["status"] == nil {
 		return false
 	}
@@ -507,7 +507,7 @@ func (h *BRHandler) CheckOadpOperatorAvailability(ctx context.Context) error {
 
 	// Check if OADP DPA is reconciled
 	dpaList := &unstructured.UnstructuredList{}
-	dpaList.SetGroupVersionKind(dpaGvkList)
+	dpaList.SetGroupVersionKind(DpaGvkList)
 	opts := []client.ListOption{
 		client.InNamespace(OadpNs),
 	}
@@ -527,18 +527,5 @@ func (h *BRHandler) CheckOadpOperatorAvailability(ctx context.Context) error {
 		return NewBRFailedValidationError("OADP", errMsg)
 	}
 
-	if !isDPAReconciled(&dpaList.Items[0]) {
-		errMsg := fmt.Sprintf("DataProtectionApplication CR %s is not reconciled", dpaList.Items[0].GetName())
-		h.Log.Error(nil, errMsg)
-		return NewBRFailedValidationError("OADP", errMsg)
-	}
-
-	// Check if the storage backend is ready
-	err := h.ensureStorageBackendAvailable(ctx, OadpNs)
-	if err != nil {
-		return NewBRFailedValidationError("OADP", err.Error())
-	}
-
-	h.Log.Info("OADP operator is running")
 	return nil
 }

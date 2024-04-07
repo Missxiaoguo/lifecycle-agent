@@ -9,13 +9,17 @@ import (
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	backuprestore "github.com/openshift-kni/lifecycle-agent/internal/backuprestore"
 
 	sriovv1 "github.com/k8snetworkplumbingwg/sriov-network-operator/api/v1"
 	configv1 "github.com/openshift/api/config/v1"
 	mcv1 "github.com/openshift/api/machineconfiguration/v1"
 	operatorsv1alpha1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
+	velerov1 "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 )
@@ -73,17 +77,23 @@ func HealthChecks(ctx context.Context, c client.Reader, l logr.Logger) error {
 		failures = append(failures, err.Error())
 	}
 
+	if err := AreCertificateSigningRequestsReady(ctx, c, l); err != nil {
+		l.Info("certificateSigningRequest (csr) health check failure", "error", err.Error())
+		failures = append(failures, err.Error())
+	}
+
 	if clusterOperatorsReady && clusterServiceVersionsReady {
 		// Only check SriovNetworkNodeState once cluster operators and CSVs are stable
 		if err := IsSriovNetworkNodeReady(ctx, c, l); err != nil {
 			l.Info("sriovNetworkNodeState health check failure", "error", err.Error())
 			failures = append(failures, err.Error())
 		}
-	}
 
-	if err := AreCertificateSigningRequestsReady(ctx, c, l); err != nil {
-		l.Info("certificateSigningRequest (csr) health check failure", "error", err.Error())
-		failures = append(failures, err.Error())
+		// Check oadp storage backend connection
+		if err := IsOadpStorageBackendConnected(ctx, c, l); err != nil {
+			l.Info("OADP health check failure", "error", err.Error())
+			failures = append(failures, err.Error())
+		}
 	}
 
 	if len(failures) > 0 {
@@ -92,6 +102,60 @@ func HealthChecks(ctx context.Context, c client.Reader, l logr.Logger) error {
 	}
 
 	l.Info("Health checks done")
+	return nil
+}
+
+func IsOadpStorageBackendConnected(ctx context.Context, c client.Reader, l logr.Logger) error {
+	dpaCRD := &apiextensionsv1.CustomResourceDefinition{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "dataprotectionapplications.oadp.openshift.io"}, dpaCRD); err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to check dataProtectionApplication CRD: %w", err)
+	}
+
+	dpaList := &unstructured.UnstructuredList{}
+	dpaList.SetGroupVersionKind(backuprestore.DpaGvkList)
+	opts := []client.ListOption{
+		client.InNamespace(backuprestore.OadpNs),
+	}
+	if err := c.List(ctx, dpaList, opts...); err != nil {
+		return fmt.Errorf("failed to list OADP dataProtectionApplication: %w", err)
+	}
+	if len(dpaList.Items) == 0 {
+		return nil
+	}
+
+	for _, dpa := range dpaList.Items {
+		if backuprestore.IsDPAReconciled(&dpa) { //nolint:gosec
+			if err := AreBackupStorageLocationsAvailable(ctx, c, l); err != nil {
+				return err
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("dataProtectionApplication not reconciled")
+}
+
+func AreBackupStorageLocationsAvailable(ctx context.Context, c client.Reader, l logr.Logger) error {
+	backupStorageLocation := &velerov1.BackupStorageLocationList{}
+	err := c.List(ctx, backupStorageLocation, client.InNamespace(backuprestore.OadpNs))
+	if err != nil {
+		return fmt.Errorf("failed to list backupsStorageLocation: %w", err)
+	}
+	if len(backupStorageLocation.Items) == 0 {
+		return fmt.Errorf("backupsStorageLocations not yet created")
+	}
+
+	for _, bsl := range backupStorageLocation.Items {
+		if bsl.Status.Phase != velerov1.BackupStorageLocationPhaseAvailable {
+			msg := fmt.Sprintf("backupStorageLocation %s not available", bsl.Name)
+			l.Info(msg)
+			return fmt.Errorf(msg)
+		}
+	}
+
+	l.Info("All backupStorageLocations are available")
 	return nil
 }
 
